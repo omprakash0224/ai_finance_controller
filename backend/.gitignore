@@ -29,10 +29,9 @@ pip-delete-this-directory.txt
 .env.local
 .env.*.local
 
-# SQLite databases
-*.db
-*.sqlite
-*.sqlite3
+# PostgreSQL / psycopg2 (no local file artifacts — data lives on Neon)
+# .pgpass is a local credentials file — never commit it
+.pgpass
 
 # pytest / coverage
 .pytest_cache/

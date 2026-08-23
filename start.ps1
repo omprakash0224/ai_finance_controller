@@ -19,6 +19,21 @@ $ErrorActionPreference = "Stop"
 
 $root = $PSScriptRoot
 
+# ── 0. Pre-flight: verify .env has DATABASE_URL ───────────────────────────────
+$envFile = Join-Path $root "backend\.env"
+if (-not (Test-Path $envFile)) {
+    Write-Host "⚠️  backend\.env not found." -ForegroundColor Yellow
+    Write-Host "   Copy .env.example → backend\.env and fill in DATABASE_URL." -ForegroundColor Yellow
+    exit 1
+}
+$envContent = Get-Content $envFile -Raw
+if ($envContent -notmatch "DATABASE_URL\s*=\s*postgresql://") {
+    Write-Host "⚠️  DATABASE_URL is not set in backend\.env." -ForegroundColor Yellow
+    Write-Host "   Add your Neon connection string and re-run." -ForegroundColor Yellow
+    exit 1
+}
+Write-Host "✅  DATABASE_URL detected." -ForegroundColor Green
+
 # ── 1. Backend: create / reuse venv ──────────────────────────────────────────
 Write-Host "`n[1/4] Checking Python virtual environment..." -ForegroundColor Cyan
 $venvPath = Join-Path $root "backend\.venv"

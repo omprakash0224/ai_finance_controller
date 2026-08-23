@@ -4,11 +4,18 @@ tests/test_api.py
 Integration tests for the FastAPI endpoints defined in main.py.
 
 Uses httpx + FastAPI's TestClient (ASGI).  The lifespan context manager runs,
-loading the real synthetic batch, so these tests hit a fully initialised DB.
+connecting to Neon PostgreSQL and seeding the 60-row batch, so these tests
+hit a fully initialised database.
+
+These tests are SKIPPED automatically when DATABASE_URL is not set in the
+environment.  To run them:
+
+    $env:DATABASE_URL = "postgresql://user:pass@host/dbname?sslmode=require"
+    .venv\\Scripts\\pytest tests/test_api.py -v
 
 Covers
 ------
-- GET  /health            — status=ok, db counts present
+- GET  /health            — status=ok, db_backend=neon_postgresql, db counts present
 - GET  /api/data          — full DataBatch JSON, correct counts
 - GET  /api/data/payments — list of payment dicts
 - GET  /api/data/bank     — list of bank txn dicts
@@ -23,12 +30,23 @@ Covers
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from fastapi.testclient import TestClient
 
 from main import app
 from data.generator import BATCH_SIZE
 from data.schema import ErrorType
+
+# ---------------------------------------------------------------------------
+# Skip entire module if DATABASE_URL is not available
+# ---------------------------------------------------------------------------
+
+pytestmark = pytest.mark.skipif(
+    not os.getenv("DATABASE_URL"),
+    reason="DATABASE_URL not set — skipping Neon API integration tests",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +70,11 @@ class TestHealth:
         data = resp.json()
         assert data["status"] == "ok"
         assert data["service"] == "ai-finance-controller"
+
+    def test_db_backend_is_neon(self, client: TestClient):
+        resp = client.get("/health")
+        data = resp.json()
+        assert data.get("db_backend") == "neon_postgresql"
 
     def test_db_counts_present(self, client: TestClient):
         resp = client.get("/health")
