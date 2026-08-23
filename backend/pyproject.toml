@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]          # adds backend/ to sys.path (pytest >= 7)
+addopts = "-v --tb=short"
