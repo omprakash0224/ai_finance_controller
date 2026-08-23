@@ -1,0 +1,20 @@
+# Stable ADK — pinned to tested release
+google-adk==2.7.0
+
+# LLM client
+google-genai>=1.16.0
+
+# API server
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+
+# Data & validation
+pandas>=2.2.0
+pydantic>=2.7.0
+faker>=28.0.0
+
+# Razorpay SDK (payment ID schema reference + settlement simulation)
+razorpay>=1.4.2
+
+# Utilities
+python-dotenv>=1.0.0
