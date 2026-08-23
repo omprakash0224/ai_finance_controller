@@ -39,7 +39,7 @@ an exception report, and the forecast chart.
 | Agent framework | **Google ADK** (`google-adk`) | **`==2.7.0`** (stable) | Native tool-calling, multi-agent orchestration, streaming |
 | LLM | **Gemini 2.5 Flash** via `google-genai` | `>=1.16.0` | Fast, cheap, function-calling, large context for 50+ records |
 | API server | **FastAPI** + `uvicorn` | `>=0.115.0` | Async, streaming SSE, easy CORS |
-| Data layer | **Pandas** + in-memory SQLite (`sqlite3`) | stdlib | No infra needed; full SQL reasoning |
+| Data layer | **Pandas** + Neon PostgreSQL (`psycopg2-binary`) | `>=2.9.9` | Serverless Postgres; full SQL reasoning |
 | Synthetic data | **Faker** + custom Razorpay generator | `>=28.0.0` | Reproducible 50+ record batches with controlled error rate |
 | Validation | **Pydantic v2** | `>=2.7.0` | Typed models for every record and agent output |
 | Razorpay SDK | **razorpay** | `>=1.4.2` | Payment ID generation, settlement object simulation |
@@ -218,7 +218,7 @@ graph TB
         T8["resolve_payment_id(pay_id)"]
     end
 
-    subgraph DATA["Data Layer — SQLite in-memory"]
+    subgraph DATA["Data Layer — Neon PostgreSQL"]
         DB_PAY["razorpay_payments"]
         DB_BANK["bank_statements"]
         DB_LED["ledger_entries"]
@@ -253,7 +253,7 @@ sequenceDiagram
     participant REC as Reconciler Agent
     participant TAX as Tax Matcher
     participant FORE as Forecaster
-    participant DB as SQLite
+    participant DB as Neon DB
 
     FE->>BE: POST /api/run
     BE->>DB: Load 60-row synthetic batch
@@ -424,7 +424,7 @@ Target: **>= 75% auto-match rate**, with every exception fully explained.
 ### Phase 1 — Synthetic Data & Schema (Day 1-2)
 - [ ] `data/schema.py`: Pydantic models for `RazorpayPayment`, `BankTxn`, `LedgerEntry`, `Settlement`, `MatchResult`, `ExceptionRecord`
 - [ ] `data/generator.py`: Razorpay-realistic 60-row batches with `pay_` / `setl_` / `order_` IDs, T+0/T+1/T+2 settlement dates, UTR numbers, controlled error injection (fixed `seed=42`)
-- [ ] Load all tables into in-memory SQLite on server startup
+- [ ] Connect to Neon PostgreSQL and seed data on server startup
 - [ ] `GET /api/data` returns raw batch as JSON for UI preview
 
 ### Phase 2 — Agent Core (Day 2-3)
@@ -462,7 +462,7 @@ Target: **>= 75% auto-match rate**, with every exception fully explained.
 ### Reconciler system prompt (excerpt)
 ```
 You are a Razorpay bank reconciliation agent. You have access to tools to query
-a razorpay_payments table, a bank_statements table, and a ledger_entries table in SQLite.
+a razorpay_payments table, a bank_statements table, and a ledger_entries table in Neon PostgreSQL.
 
 Razorpay payment IDs start with "pay_", settlement IDs with "setl_", orders with "order_".
 The settlement_utr in razorpay_payments should match the bank_ref in bank_statements.
@@ -516,6 +516,9 @@ razorpay>=1.4.2
 
 # Utilities
 python-dotenv>=1.0.0
+
+# Database — Neon PostgreSQL
+psycopg2-binary>=2.9.9
 ```
 
 > **Python requirement**: 3.11 or later (ADK 2.x hard requirement)
