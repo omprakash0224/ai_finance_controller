@@ -125,7 +125,7 @@ async def run_forecaster() -> AsyncGenerator[dict, None]:
     )
 
     yield {"type": "step", "agent": "forecaster",
-           "message": "📈 Forecaster agent starting — projecting 30-day cash flow..."}
+           "message": "Forecaster agent starting — projecting 30-day cash flow..."}
 
     final_text = ""
     try:

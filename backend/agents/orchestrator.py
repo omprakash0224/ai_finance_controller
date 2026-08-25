@@ -169,7 +169,7 @@ async def run_pipeline() -> AsyncGenerator[dict, None]:
     yield {
         "type": "step",
         "agent": "orchestrator",
-        "message": "🚀 AI Finance Pipeline starting — Reconciler → TaxMatcher → Forecaster",
+        "message": "AI Finance Pipeline starting — Reconciler → TaxMatcher → Forecaster",
     }
 
     reconciler_result: dict = {}
@@ -181,7 +181,7 @@ async def run_pipeline() -> AsyncGenerator[dict, None]:
         # Stage 1 — Reconciler
         # ----------------------------------------------------------------
         yield {"type": "step", "agent": "orchestrator",
-               "message": "📋 Stage 1/3: Running Reconciler agent..."}
+               "message": "Stage 1/3: Running Reconciler agent..."}
 
         async for event in run_reconciler():
             yield event
@@ -209,7 +209,7 @@ async def run_pipeline() -> AsyncGenerator[dict, None]:
         # Stage 3 — Forecaster
         # ----------------------------------------------------------------
         yield {"type": "step", "agent": "orchestrator",
-               "message": "📈 Stage 3/3: Running Forecaster agent..."}
+               "message": "Stage 3/3: Running Forecaster agent..."}
 
         async for event in run_forecaster():
             yield event

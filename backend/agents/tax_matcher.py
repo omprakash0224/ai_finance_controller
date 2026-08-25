@@ -119,7 +119,7 @@ async def run_tax_matcher() -> AsyncGenerator[dict, None]:
     )
 
     yield {"type": "step", "agent": "tax_matcher",
-           "message": "🧾 Tax Matcher agent starting — tagging GST codes..."}
+           "message": "Tax Matcher agent starting — tagging GST codes..."}
 
     final_text = ""
     try:
@@ -156,7 +156,7 @@ async def run_tax_matcher() -> AsyncGenerator[dict, None]:
         "type": "step",
         "agent": "tax_matcher",
         "message": (
-            f"✅ Tax tagging complete — "
+            f"Tax tagging complete — "
             f"{tax_summary.get('total_tagged', '?')} payments tagged, "
             f"total GST: ₹{tax_summary.get('total_tax_inr', '?')}"
         ),
