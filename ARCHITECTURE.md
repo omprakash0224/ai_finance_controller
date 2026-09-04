@@ -1,7 +1,7 @@
-# AI Finance Controller — Architecture & Systems Design
+# FinClear AI — Architecture & Systems Design
 
 > **Author**: Solo Developer & System Architect  
-> **Project**: AI Finance Controller  
+> **Project**: FinClear AI  
 > **Status**: Production Blueprint / System Design Document  
 > **Scope**: System Architecture, Architecture Decision Records (ADRs), Scaling Dynamics, Effectiveness Auditing, Cost Optimization  
 
@@ -9,7 +9,7 @@
 
 ## 1. Executive Summary & Core Philosophy
 
-I designed and built the **AI Finance Controller** as an autonomous, enterprise-grade finance-operations pipeline to solve a problem that traditionally burns thousands of hours of manual labor: reconciling payment gateway settlements (Razorpay), bank statement clearing credits (NEFT/RTGS/IMPS), and internal accounting ledgers.
+I designed and built **FinClear AI** as an autonomous, enterprise-grade finance-operations pipeline to solve a problem that traditionally burns thousands of hours of manual labor: reconciling payment gateway settlements (Razorpay), bank statement clearing credits (NEFT/RTGS/IMPS), and internal accounting ledgers.
 
 As a solo developer, I operated under two non-negotiable constraints:
 1. **Zero operational overhead**: I cannot have a team of support staff manually triaging exceptions or babysitting brittle cron jobs.
