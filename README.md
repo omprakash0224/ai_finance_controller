@@ -255,7 +255,7 @@ ai_finance_controller/
 - **Python**: `3.11` or later (`google-adk 2.x` requirement)
 - **Node.js**: `18.x` or later (for Vite and React 18)
 - **Database**: Neon PostgreSQL connection string (or standard PostgreSQL 15+)
-- **Redis (Optional)**: Upstash Redis REST credentials or local Redis server
+- **Redis**: Upstash Redis REST credentials or local Redis server
 - **API Keys**: Google Gemini API key (`GOOGLE_API_KEY`)
 
 ---
