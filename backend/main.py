@@ -91,6 +91,8 @@ async def health() -> dict[str, Any]:
     try:
         counts = _db.table_counts()
         from agents.orchestrator import is_run_in_progress
+        from tools.cache import is_cache_available
+        import os
         return {
             "status": "ok",
             "service": "ai-finance-controller",
@@ -98,6 +100,15 @@ async def health() -> dict[str, Any]:
             "db_backend": "neon_postgresql",
             "db": counts,
             "pipeline_running": is_run_in_progress(),
+            "cache": {
+                "backend":   "upstash_redis",
+                "available": is_cache_available(),
+            },
+            "celery": {
+                "broker":    "redis (upstash or local)",
+                "configured": bool(os.getenv("CELERY_BROKER_URL")),
+                "queue":     "finance_batch",
+            },
         }
     except (RuntimeError, Exception):
         return {"status": "starting", "service": "ai-finance-controller"}
@@ -338,8 +349,18 @@ async def settlement_qa(body: QARequest) -> dict[str, Any]:
     """
     Natural-language Q&A over reconciled settlement data.
 
-    The agent translates the question to SQL, executes it against Neon
-    PostgreSQL, and returns a structured answer with supporting data rows.
+    Three-tier response strategy:
+      Tier 1 — Upstash Redis cache (< 5 ms, $0 cost)
+        Exact question matches return instantly from Redis.
+      Tier 2 — Smart SQL fast-path (< 80 ms, $0 AI cost)
+        Aggregate questions (match rate, GST, pending, exceptions, volume)
+        are answered from pre-aggregated SQL views — no Gemini call.
+      Tier 3 — Gemini LLM Agent (novel / complex questions)
+        The agent generates and executes SQL; the result is cached in Redis.
+
+    Response metadata fields:
+      _source : 'cache' | 'fast_path:<metric>' | 'llm'
+      _cache  : 'hit' | 'miss'
 
     Example questions:
     - "How much is pending settlement?"
@@ -349,10 +370,157 @@ async def settlement_qa(body: QARequest) -> dict[str, Any]:
     """
     from agents.settlement_qa import answer_question
 
-    result = {}
+    result: dict[str, Any] = {}
     async for event in answer_question(body.question):
         if event.get("type") == "result":
             result = event.get("data", {})
         elif event.get("type") == "error":
             raise HTTPException(status_code=500, detail=event.get("message", "Q&A error"))
     return result
+
+
+# ---------------------------------------------------------------------------
+# Cache management endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/qa/cache/flush", tags=["Cache"])
+async def flush_qa_cache() -> dict[str, Any]:
+    """
+    Flush all Upstash Redis Q&A and metrics caches.
+
+    Call this after loading fresh data to ensure users receive
+    up-to-date answers rather than stale cached responses.
+    Returns counts of deleted keys per prefix.
+    """
+    from tools.cache import flush_cache
+    result = flush_cache()
+    return {"status": "ok", **result}
+
+
+@app.get("/api/qa/cache/status", tags=["Cache"])
+async def qa_cache_status() -> dict[str, Any]:
+    """
+    Return Upstash Redis cache availability and configuration.
+
+    Useful for verifying that the cache is properly configured
+    before relying on it for production workloads.
+    """
+    from tools.cache import is_cache_available, _qa_ttl, _metrics_ttl
+    import os
+    return {
+        "cache_available":           is_cache_available(),
+        "backend":                   "upstash_redis",
+        "upstash_url_configured":    bool(os.getenv("UPSTASH_REDIS_URL")),
+        "upstash_token_configured":  bool(os.getenv("UPSTASH_REDIS_TOKEN")),
+        "qa_cache_ttl_seconds":      _qa_ttl(),
+        "metrics_cache_ttl_seconds": _metrics_ttl(),
+    }
+
+
+@app.post("/api/qa/cache/warm", tags=["Cache"])
+async def warm_qa_cache() -> dict[str, Any]:
+    """
+    Pre-compute and cache all pre-aggregated metrics in Upstash Redis.
+
+    Triggers the same cache warm-up that runs automatically after each
+    pipeline run.  Useful after manually loading new data.
+    """
+    from agents.settlement_qa import warm_cache
+    return await warm_cache()
+
+
+# ---------------------------------------------------------------------------
+# Background batch processing — Celery job endpoints
+# ---------------------------------------------------------------------------
+
+class AsyncRunRequest(BaseModel):
+    chunk_size: int = 5000   # override CELERY_CHUNK_SIZE for this run
+
+
+@app.post("/api/run/async", tags=["Background Jobs"])
+async def run_pipeline_async(body: AsyncRunRequest = AsyncRunRequest()) -> dict[str, Any]:
+    """
+    Dispatch the finance-ops pipeline as a background Celery job.
+
+    Unlike POST /api/run (synchronous, SSE streaming), this endpoint
+    returns immediately with a job_id and processes the full batch in
+    background Celery workers using parallel chunked execution.
+
+    Processing flow:
+      1. Celery splits the batch into chunks of `chunk_size` payments.
+      2. Each chunk is processed in parallel (ingest → reconcile → tax tag).
+      3. A finalize task aggregates results and warms the Q&A cache.
+
+    Poll GET /api/jobs/{job_id} to track progress.
+
+    Requires:
+      - CELERY_BROKER_URL env var pointing to Redis / Upstash
+      - At least one Celery worker running:
+          cd backend && celery -A worker.celery_app worker --loglevel=info
+    """
+    import uuid
+    from worker.tasks import run_batch_pipeline
+
+    job_id = f"job_{uuid.uuid4().hex[:12]}"
+
+    try:
+        run_batch_pipeline.apply_async(
+            kwargs={"job_id": job_id, "chunk_size": body.chunk_size},
+            queue="finance_batch",
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Could not connect to Celery broker: {exc}. "
+                f"Ensure CELERY_BROKER_URL is set and a worker is running. "
+                f"For immediate processing use POST /api/run instead."
+            ),
+        ) from exc
+
+    return {
+        "job_id":       job_id,
+        "status":       "queued",
+        "message":      (
+            f"Batch job dispatched to Celery (chunk_size={body.chunk_size}). "
+            f"Poll GET /api/jobs/{job_id} for progress."
+        ),
+        "poll_url":     f"/api/jobs/{job_id}",
+        "chunk_size":   body.chunk_size,
+    }
+
+
+@app.get("/api/jobs/{job_id}", tags=["Background Jobs"])
+async def get_job_status(job_id: str) -> dict[str, Any]:
+    """
+    Poll the status of a background Celery batch job.
+
+    Response fields:
+      state         : 'queued' | 'preparing' | 'running' | 'finalizing' | 'done' | 'failed'
+      progress_pct  : 0-100
+      message       : human-readable status string
+      chunks_done   : number of completed parallel chunks
+      total_chunks  : total number of chunks in this job
+      report        : final report dict (only present when state='done')
+    """
+    from worker.tasks import read_job_status
+
+    status = read_job_status(job_id)
+    if status is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Job '{job_id}' not found. It may have expired or never existed.",
+        )
+    return status
+
+
+@app.get("/api/jobs", tags=["Background Jobs"])
+async def list_jobs() -> list[dict[str, Any]]:
+    """
+    List recent background batch jobs (last 100, sorted newest first).
+
+    Each entry contains: job_id, state, progress_pct, message, started_at.
+    Full reports are available via GET /api/jobs/{job_id}.
+    """
+    from worker.tasks import list_recent_jobs
+    return list_recent_jobs()

@@ -22,6 +22,19 @@ python-dotenv>=1.0.0
 # Database — Neon PostgreSQL
 psycopg2-binary>=2.9.9
 
+# Caching — Upstash Redis (serverless Redis via HTTP REST API)
+# Used by Settlement Q&A three-tier cache (Tier 1: Redis, Tier 2: SQL, Tier 3: LLM)
+# Optional: if not installed / credentials not set, cache silently degrades to no-op
+upstash-redis>=0.15.0
+
+# Background batch processing — Celery + Redis broker
+# celery:   task queue framework for chunked parallel reconciliation
+# redis:    redis-py client used by worker tasks to write job status
+# flower:   real-time Celery monitoring UI (optional, dev/ops tool)
+celery[redis]>=5.4.0
+redis>=5.0.0
+flower>=2.0.0
+
 # Testing
 pytest>=8.0.0
 httpx>=0.27.0           # required by FastAPI TestClient
