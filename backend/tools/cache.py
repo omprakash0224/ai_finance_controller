@@ -93,7 +93,9 @@ def _get_client() -> Optional[Any]:
 
 def is_cache_available() -> bool:
     """Return True if Redis is configured and reachable."""
-    return _redis_available and _get_client() is not None
+    client = _get_client()
+    return bool(client is not None and _redis_available)
+
 
 
 # ---------------------------------------------------------------------------
