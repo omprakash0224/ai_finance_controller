@@ -398,21 +398,32 @@ def _fingerprint_exception_clusters() -> list[dict]:
     """
     rows = _db.query(
         """
+        WITH ranked AS (
+            SELECT
+                e.reason,
+                COALESCE(p.method, 'unknown')         AS method,
+                p.pay_id,
+                p.net_amount,
+                p.settlement_date,
+                ROW_NUMBER() OVER (
+                    PARTITION BY e.reason, COALESCE(p.method, 'unknown')
+                    ORDER BY p.pay_id
+                )                                     AS rn
+            FROM exceptions e
+            JOIN razorpay_payments p ON p.pay_id = e.record_id
+        )
         SELECT
-            e.reason,
-            COALESCE(p.method, 'unknown')         AS method,
+            reason,
+            method,
             COUNT(*)                              AS anomaly_count,
-            ROUND(AVG(p.net_amount::NUMERIC), 2)  AS avg_amount_inr,
-            MIN(p.settlement_date)                AS earliest_date,
-            MAX(p.settlement_date)                AS latest_date,
-            -- Grab up to 3 sample pay_ids for reference
-            STRING_AGG(p.pay_id, ', '
-                ORDER BY p.pay_id
-                LIMIT 3
-            )                                     AS sample_pay_ids
-        FROM exceptions e
-        JOIN razorpay_payments p ON p.pay_id = e.record_id
-        GROUP BY e.reason, p.method
+            ROUND(AVG(net_amount::NUMERIC), 2)    AS avg_amount_inr,
+            MIN(settlement_date)                  AS earliest_date,
+            MAX(settlement_date)                  AS latest_date,
+            -- Collect up to 3 sample pay_ids for reference
+            STRING_AGG(pay_id, ', ' ORDER BY pay_id)
+                FILTER (WHERE rn <= 3)             AS sample_pay_ids
+        FROM ranked
+        GROUP BY reason, method
         ORDER BY anomaly_count DESC
         """
     )
