@@ -1,4 +1,4 @@
-# AI Finance Controller
+# FinClear AI
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com)
@@ -41,7 +41,7 @@ The platform provides deterministic verification, AI-powered root cause clusteri
 
 In enterprise finance operations, **verification capacity, not generation speed**, is the critical bottleneck. Reconciliation, settlement clearing, and cash forecasting are traditionally manual, labor-intensive processes performed in spreadsheets.
 
-**AI Finance Controller** solves this by combining:
+**FinClear AI** solves this by combining:
 1. **Deterministic SQL Speed**: Set-based relational matching handles high-volume transactions in milliseconds inside PostgreSQL.
 2. **Cost-Minimised Agentic Reasoning**: Google ADK (`2.7.0`) and Gemini LLMs reason about discrepancies, cluster systemic exceptions, and answer natural-language queries.
 3. **Auditability & Honest Reporting**: No cherry-picked data. Every exception is surfaced with ground-truth verification, confidence scoring, agent reasoning, and recommended remediation actions.
@@ -196,7 +196,7 @@ The `/api/qa` endpoint serves natural language queries against financial data us
 ## Repository Structure
 
 ```
-ai_finance_controller/
+finclear-ai/
 ├── backend/
 │   ├── agents/
 │   │   ├── orchestrator.py     # Multi-agent orchestrator & SSE event stream
