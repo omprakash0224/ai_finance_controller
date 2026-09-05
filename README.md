@@ -9,6 +9,7 @@
 [![PostgreSQL](https://img.shields.io/badge/Neon-PostgreSQL-336791.svg)](https://neon.tech/)
 [![Redis](https://img.shields.io/badge/Upstash-Redis-FF4438.svg)](https://upstash.com/)
 [![Celery](https://img.shields.io/badge/Celery-5.4+-37814A.svg)](https://docs.celeryq.dev/)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED.svg)](https://docs.docker.com/compose/)
 
 An autonomous, enterprise-grade **agentic finance-operations pipeline** that closes the loop across multi-source financial records: matching payment gateway settlements (Razorpay), bank statement credits, and internal accounting ledgers.
 
@@ -26,6 +27,7 @@ The platform provides deterministic verification, AI-powered root cause clusteri
 - [Repository Structure](#repository-structure)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
+  - [Docker Setup (Recommended)](#docker-setup-recommended)
   - [Automated Boot (Windows PowerShell)](#automated-boot-windows-powershell)
   - [Manual Setup](#manual-setup)
 - [Environment Variables](#environment-variables)
@@ -243,9 +245,18 @@ finclear-ai/
 ├── extras/
 │   └── scaling_and_cost_optimization.md # Guide for 1M+ records & enterprise setup
 ├── .env.example                # Template for environment configuration
+├── .env.docker                 # Docker-specific env template (Celery → local Redis)
+├── docker-compose.yml          # Full-stack Docker Compose (5 services)
 ├── PLAN.md                     # Comprehensive technical implementation blueprint
 ├── start.ps1                   # Single-command startup script (PowerShell)
 └── README.md                   # Project documentation
+
+# Docker files per service:
+# backend/Dockerfile            — Python 3.12-slim image (API + Worker + Flower)
+# backend/.dockerignore
+# frontend/Dockerfile           — Node 20 build → Nginx 1.27 serve
+# frontend/nginx.conf           — SPA routing + /api proxy + SSE buffering
+# frontend/.dockerignore
 ```
 
 ---
@@ -261,6 +272,146 @@ finclear-ai/
 ---
 
 ## Quick Start
+
+### Docker Setup (Recommended)
+
+Run the entire stack — FastAPI backend, Celery worker, Flower UI, local Redis broker, and the React frontend — with a single command. No Python or Node.js installation required on the host.
+
+#### Prerequisites
+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (includes Docker Compose v2)
+
+#### Services
+
+| Service | URL | Description |
+|---------|-----|-------------|
+| `frontend` | http://localhost | React dashboard (Nginx, Vite production build) |
+| `backend` | http://localhost:8000 | FastAPI / Uvicorn |
+| `backend` docs | http://localhost:8000/docs | Swagger UI |
+| `redis` | localhost:6379 | Local Redis (Celery broker) |
+| `flower` | http://localhost:5555 | Celery monitoring UI (optional profile) |
+
+#### 1. Configure Environment
+
+Copy the Docker env template and fill in your credentials:
+
+```bash
+# From the project root
+cp .env.docker backend/.env
+```
+
+Edit `backend/.env` with your real values:
+
+```env
+# Required
+GOOGLE_API_KEY=AIzaSy...
+DATABASE_URL=postgresql://user:password@ep-xyz.region.aws.neon.tech/dbname?sslmode=require
+
+# Optional — Razorpay schema reference
+RAZORPAY_KEY_ID=rzp_live_...
+RAZORPAY_KEY_SECRET=...
+
+# Optional — Upstash Redis for Q&A three-tier cache
+UPSTASH_REDIS_URL=https://your-instance.upstash.io
+UPSTASH_REDIS_TOKEN=your-rest-token
+
+# Pre-configured for Docker (uses the local redis service)
+CELERY_BROKER_URL=redis://redis:6379/0
+CELERY_RESULT_BACKEND=redis://redis:6379/1
+```
+
+> **Note**: `DATABASE_URL` points to your Neon PostgreSQL cloud instance — no local Postgres container is needed. `CELERY_BROKER_URL` is pre-set to `redis://redis:6379/0`, which resolves to the `redis` service inside Docker's internal network.
+
+#### 2. Build & Launch
+
+```bash
+# Build all images and start core services
+docker compose up --build
+
+# Or run in the background (detached)
+docker compose up --build -d
+```
+
+On first launch, Docker will:
+1. Build the Python 3.12-slim backend image and install all pip dependencies.
+2. Build the Node 20 + Nginx frontend image and run `vite build`.
+3. Start all 5 services with health-check ordering (Redis → backend → worker → frontend).
+
+Open **http://localhost** in your browser.
+
+#### 3. Run with Flower Monitoring (Optional)
+
+Flower is hidden behind a Docker Compose profile to keep the default startup lean:
+
+```bash
+docker compose --profile monitoring up --build
+```
+
+Then open **http://localhost:5555** to see the real-time Celery task dashboard.
+
+#### 4. Scale Workers
+
+For heavy batch loads, scale Celery workers horizontally:
+
+```bash
+docker compose up --scale worker=4
+```
+
+#### 5. Common Commands
+
+```bash
+# View live logs for all services
+docker compose logs -f
+
+# View logs for a specific service
+docker compose logs -f backend
+docker compose logs -f worker
+
+# Restart a single service (e.g. after code change)
+docker compose restart backend
+
+# Stop all services
+docker compose down
+
+# Stop and remove volumes (wipes local Redis data)
+docker compose down -v
+
+# Rebuild a single image after dependency changes
+docker compose build backend
+docker compose up -d --no-deps backend
+```
+
+#### Docker Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  docker-compose                                                 │
+│                                                                 │
+│  ┌──────────┐    ┌──────────┐   ┌──────────┐   ┌──────────┐     │
+│  │ frontend │    │ backend  │   │  worker  │   │  flower  │     │
+│  │ :80/Nginx│───▶│ :8000    │◀──│ (celery) │   │  :5555  │     │
+│  └──────────┘    └──────────┘   └──────────┘   └──────────┘     │
+│        │               │              │               │         │
+│   React SPA       FastAPI        Same image       Same image    │
+│   + /api proxy    Uvicorn        finance_batch     monitoring   │
+│                        │              │               │         │
+│                        └──────────────┴───────────────┘         │
+│                                       │                         │
+│                               ┌──────────┐                      │
+│                               │  redis   │  (local broker)      │
+│                               │  :6379   │                      │
+│                               └──────────┘                      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### Production Notes
+
+- **Remove dev volume mounts**: The `docker-compose.yml` mounts `./backend:/app` for hot-reload. For production, remove the `volumes:` block from the `backend` and `worker` services so the image uses its baked-in code.
+- **Disable `--reload`**: Change the backend `command` from `uvicorn main:app ... --reload` to without `--reload`.
+- **Use Upstash Redis for Celery broker**: Replace `redis://redis:6379/0` with your Upstash TCP endpoint (`rediss://...`) for a managed, persistent broker in production.
+- **Reverse proxy / TLS**: Put an Nginx or Traefik reverse proxy in front of the `frontend` container for HTTPS termination.
+
+---
 
 ### Automated Boot (Windows PowerShell)
 
