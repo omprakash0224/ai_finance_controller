@@ -1,0 +1,136 @@
+# ============================================================
+# AI Finance Controller — Docker Compose
+# ============================================================
+# Services:
+#   redis    — Local Redis 7 broker for Celery (dev default)
+#   backend  — FastAPI / Uvicorn (port 8000)
+#   worker   — Celery worker  (same image as backend)
+#   flower   — Celery monitoring UI (port 5555)
+#   frontend — Nginx serving React/Vite build + /api proxy (port 80)
+#
+# Quick start:
+#   1. cp .env.docker backend/.env        # fill in API keys
+#   2. docker compose up --build
+#   3. Open http://localhost
+#
+# Scale workers:
+#   docker compose up --scale worker=3
+# ============================================================
+
+services:
+
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  # Local Redis used as the Celery broker and result backend.
+  # Upstash Redis (for Q&A cache) is configured separately via env vars.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - redis_data:/data
+
+  # ── Backend — FastAPI / Uvicorn ───────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      # Override broker URL to use the redis service name (Docker DNS)
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    volumes:
+      # Mount backend source for hot-reload in development (remove for production)
+      - ./backend:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ── Celery Worker ─────────────────────────────────────────────────────────
+  # Reuses the backend image — same Python environment, different entry point.
+  # On Linux/macOS, prefork gives true parallelism.
+  # Add --pool=solo if running on Windows with the backend image.
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    depends_on:
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    command: >
+      celery -A worker.celery_app worker
+        --loglevel=info
+        --concurrency=4
+        -Q finance_batch
+
+  # ── Flower — Celery Monitoring UI ─────────────────────────────────────────
+  # Access at http://localhost:5555
+  # Run with: docker compose --profile monitoring up
+  flower:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "5555:5555"
+    env_file:
+      - ./backend/.env
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    depends_on:
+      redis:
+        condition: service_healthy
+    profiles:
+      - monitoring
+    volumes:
+      - ./backend:/app
+    command: >
+      celery -A worker.celery_app flower
+        --port=5555
+        --broker=redis://redis:6379/0
+
+  # ── Frontend — Nginx + Vite Build ─────────────────────────────────────────
+  # Serves the React SPA on port 80.
+  # Proxies /api/* and /health to the backend service.
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  redis_data:
+    driver: local

@@ -1,0 +1,30 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pycache
+.pytest_cache/
+
+# Virtual environment — dependencies are installed inside the image
+.venv/
+venv/
+env/
+
+# Environment secrets — injected at runtime via docker-compose env_file
+.env
+*.env
+
+# Test files — not needed at runtime
+tests/
+conftest.py
+
+# Editor / OS artifacts
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore

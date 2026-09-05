@@ -1,0 +1,19 @@
+# Dependencies — reinstalled inside the image via npm ci
+node_modules/
+
+# Previous build output — rebuilt fresh inside the image
+dist/
+
+# Git
+.git/
+.gitignore
+
+# Editor / OS artifacts
+.DS_Store
+Thumbs.db
+*.swp
+
+# Docs
+*.md
+DESIGN.md
+README.md

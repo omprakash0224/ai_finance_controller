@@ -1,1 +1,6 @@
 extras/
+
+# Environment files with secrets
+.env
+.env.docker
+backend/.env
