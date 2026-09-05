@@ -27,15 +27,23 @@ For Upstash:
   - Go to https://console.upstash.com → your Redis database
   - Copy the "Redis CLI" connection string: rediss://:<token>@<host>:6379
   - Set CELERY_BROKER_URL=rediss://:<token>@<host>:6379/0
-  - Set CELERY_RESULT_BACKEND=rediss://:<token>@<host>:6379/1
+  - Set CELERY_RESULT_BACKEND=rediss://:<token>@<host>:6379/0
+  
+  NOTE: Upstash Redis only supports database index 0 (DB 0).
+  Both broker and result backend must point to /0.
+  Job-status keys are namespaced with 'jobstatus:' prefix to avoid collisions.
 
 Or use a local Redis for development:
   - Set CELERY_BROKER_URL=redis://localhost:6379/0
-  - Set CELERY_RESULT_BACKEND=redis://localhost:6379/1
+  - Set CELERY_RESULT_BACKEND=redis://localhost:6379/0
 
 Running the worker
 ------------------
   cd backend
+  # Windows: prefork uses Unix shared memory — must use --pool=solo
+  celery -A worker.celery_app worker --loglevel=info --pool=solo
+  
+  # Linux/macOS: can use prefork for true parallelism
   celery -A worker.celery_app worker --loglevel=info --concurrency=4
 
 Environment Variables
@@ -49,6 +57,14 @@ Environment Variables
 from __future__ import annotations
 
 import os
+import ssl
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load .env from the backend directory (works regardless of where the worker
+# process is launched from).
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 from celery import Celery
 
@@ -126,7 +142,15 @@ celery_app.conf.update(
 
     # -----------------------------------------------------------------------
     # Upstash Redis SSL (set automatically if broker URL starts with rediss://)
+    # NOTE: Celery's Redis backend calls connparams.update(ssl), so these MUST
+    # be dicts of SSL kwargs — NOT plain booleans.
     # -----------------------------------------------------------------------
-    broker_use_ssl           = _broker_url().startswith("rediss://"),
-    redis_backend_use_ssl    = _backend_url().startswith("rediss://"),
+    **({
+        "broker_use_ssl": {
+            "ssl_cert_reqs": ssl.CERT_NONE,   # must be ssl module constant, not string
+        },
+        "redis_backend_use_ssl": {
+            "ssl_cert_reqs": ssl.CERT_NONE,
+        },
+    } if _broker_url().startswith("rediss://") else {}),
 )

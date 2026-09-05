@@ -48,7 +48,15 @@ import json
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Any
+
+from dotenv import load_dotenv
+
+# Load .env from the backend directory so that CELERY_BROKER_URL and other
+# env vars are available both inside task functions AND at module import time
+# (e.g. when FastAPI calls read_job_status / list_recent_jobs).
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 from celery import chord, shared_task
 from celery.utils.log import get_task_logger
@@ -64,15 +72,22 @@ def _get_job_redis():
     """
     Return a redis-py client connected to the broker Redis.
 
-    We use the broker URL (not the result backend) for job status writes
-    because it's the same instance and avoids an extra connection pool.
-    Keyed on DB index 2 to avoid collision with broker (0) and results (1).
+    We use DB 0 (the broker DB) because Upstash Redis only supports
+    database index 0. Job-status keys are namespaced with the prefix
+    'jobstatus:' to avoid collision with Celery's own broker keys.
+
+    SSL is enabled automatically when the URL starts with 'rediss://'.
     """
     import redis
+    import ssl as _ssl
     broker_url = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
-    # Point to DB 2 for job-status namespace
-    status_url = broker_url.rsplit("/", 1)[0] + "/2"
-    return redis.from_url(status_url, decode_responses=True)
+    # Always use DB 0 — Upstash and many managed Redis providers only support it.
+    # Strip any trailing /N db index and force /0.
+    base_url = broker_url.rsplit("/", 1)[0] + "/0"
+    kwargs = {"decode_responses": True}
+    if base_url.startswith("rediss://"):
+        kwargs["ssl_cert_reqs"] = _ssl.CERT_NONE
+    return redis.from_url(base_url, **kwargs)
 
 
 _STATUS_TTL = 7200  # 2 hours — keep job status in Redis
@@ -82,7 +97,8 @@ def _write_job_status(job_id: str, status: dict) -> None:
     """Write a job status dict to Redis. Silently no-ops on error."""
     try:
         r = _get_job_redis()
-        r.setex(f"job:{job_id}:status", _STATUS_TTL, json.dumps(status, default=str))
+        # Use 'jobstatus:' prefix to namespace away from Celery broker keys on DB 0
+        r.setex(f"jobstatus:{job_id}:status", _STATUS_TTL, json.dumps(status, default=str))
     except Exception as exc:                                         # noqa: BLE001
         logger.warning("Could not write job status for %s: %s", job_id, exc)
 
@@ -94,7 +110,7 @@ def read_job_status(job_id: str) -> dict | None:
     """
     try:
         r = _get_job_redis()
-        raw = r.get(f"job:{job_id}:status")
+        raw = r.get(f"jobstatus:{job_id}:status")
         if raw:
             return json.loads(raw)
         return None
@@ -110,7 +126,7 @@ def list_recent_jobs() -> list[dict]:
     """
     try:
         r   = _get_job_redis()
-        keys = r.keys("job:*:status")[:100]
+        keys = r.keys("jobstatus:*:status")[:100]
         jobs = []
         for key in sorted(keys, reverse=True):
             raw = r.get(key)
@@ -254,6 +270,55 @@ def process_chunk(self, chunk_dict: dict, job_id: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Sync bridge: drives the async _cluster_and_review_exceptions() generator
+# from inside a synchronous Celery task.
+# ---------------------------------------------------------------------------
+
+def _run_cluster_ai_sync(clusters: list[dict]) -> list[dict]:
+    """
+    Synchronous wrapper around the async _cluster_and_review_exceptions() generator.
+
+    Celery tasks are synchronous, but the AI runner uses async/await.
+    This helper:
+      1. Builds a tiny coroutine that drains the generator into a list.
+      2. Runs it with asyncio.run() (creates a fresh event loop).
+      3. Extracts and returns the cluster diagnoses from the collected events.
+
+    Falls back to asyncio.new_event_loop() if asyncio.run() detects an
+    already-running loop (can happen with Celery --pool=solo on Windows).
+
+    Parameters
+    ----------
+    clusters : The list of cluster dicts from _fingerprint_exception_clusters().
+               Passed in so the function can build a fallback if the AI fails.
+
+    Returns
+    -------
+    List of cluster diagnosis dicts (same shape as the SSE pipeline).
+    """
+    import asyncio as _asyncio
+    from agents.reconciler import _cluster_and_review_exceptions
+
+    async def _collect() -> list[dict]:
+        diagnoses: list[dict] = []
+        async for event in _cluster_and_review_exceptions():
+            if event.get("type") == "cluster_review":
+                data = event.get("data", {})
+                diagnoses = data.get("clusters", [])
+        return diagnoses
+
+    try:
+        return _asyncio.run(_collect())
+    except RuntimeError:
+        # An event loop is already running — use a new one explicitly.
+        loop = _asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(_collect())
+        finally:
+            loop.close()
+
+
+# ---------------------------------------------------------------------------
 # Task: finalize_pipeline — chord callback, runs once after all chunks finish
 # ---------------------------------------------------------------------------
 
@@ -268,9 +333,12 @@ def finalize_pipeline(self, chunk_results: list[dict], job_id: str) -> dict:
     Called automatically by the Celery chord when all process_chunk tasks
     have completed.  Runs:
       1. Aggregate counts across all chunks.
-      2. 30-day cash forecast (single SQL window function — not chunked).
-      3. Cache warm-up (Upstash Redis pre-population for Q&A).
-      4. Write final report to Redis job status.
+      2. Step 3 — Exception Fingerprint Clustering (SQL GROUP BY → compact cluster table).
+      3. Step 4 — AI Agent on Clusters (single Gemini prompt → structured diagnoses).
+      4. Full Tax Summary (deterministic SQL CASE expression).
+      5. 30-day Cash Forecast (SQL window function).
+      6. Cache warm-up (Upstash Redis pre-population for Q&A).
+      7. Write final report to Redis job status.
 
     Returns the final report dict.
     """
@@ -285,8 +353,8 @@ def finalize_pipeline(self, chunk_results: list[dict], job_id: str) -> dict:
     _write_job_status(job_id, {
         "job_id":       job_id,
         "state":        "finalizing",
-        "progress_pct": 85,
-        "message":      "All chunks done — assembling report and warming cache...",
+        "progress_pct": 82,
+        "message":      "All chunks done — aggregating results...",
         "chunks_done":  len(chunk_results),
         "total_chunks": len(chunk_results),
     })
@@ -297,34 +365,165 @@ def finalize_pipeline(self, chunk_results: list[dict], job_id: str) -> dict:
     total_payments  = sum(r.get("payments_ingested", 0) for r in chunk_results)
     total_matched   = sum(r.get("matched_count",     0) for r in chunk_results)
     total_exception = sum(r.get("exception_count",   0) for r in chunk_results)
-    total_tax       = sum(r.get("total_tax_inr",     0.0) for r in chunk_results)
     total_elapsed   = sum(r.get("elapsed_seconds",   0.0) for r in chunk_results)
     total           = total_matched + total_exception
     match_rate      = total_matched / total if total > 0 else 0.0
 
+    logger.info(
+        "finalize_pipeline: %d payments — %d matched (%.1f%%), %d exceptions",
+        total_payments, total_matched, match_rate * 100, total_exception,
+    )
+
     # -----------------------------------------------------------------------
-    # 2. Full-dataset forecast (SQL window function — runs on all data)
+    # 2. Step 3 — Exception Fingerprint Clustering (pure SQL, zero LLM cost)
+    #
+    # Condenses all N exceptions into ≤20 (reason, method) clusters by
+    # running a single SQL GROUP BY inside PostgreSQL.  The compact cluster
+    # table (~200 tokens) is what gets sent to the AI in Step 4.
     # -----------------------------------------------------------------------
+    _write_job_status(job_id, {
+        "job_id":       job_id,
+        "state":        "clustering",
+        "progress_pct": 86,
+        "message":      f"Step 3: Clustering {total_exception} exceptions into root-cause patterns (SQL)...",
+        "chunks_done":  len(chunk_results),
+        "total_chunks": len(chunk_results),
+    })
+
+    clusters: list[dict] = []
+    cluster_diagnoses: list[dict] = []
+
+    try:
+        from agents.reconciler import _fingerprint_exception_clusters
+        clusters = _fingerprint_exception_clusters()
+        logger.info(
+            "finalize_pipeline: Step 3 complete — %d exceptions → %d clusters",
+            total_exception, len(clusters),
+        )
+    except Exception as exc:                                         # noqa: BLE001
+        logger.warning("Exception fingerprinting failed (non-critical): %s", exc)
+
+    # -----------------------------------------------------------------------
+    # 3. Step 4 — AI Agent on Clusters (1 Gemini call for all exceptions)
+    #
+    # The async generator _cluster_and_review_exceptions() is driven
+    # synchronously using _run_cluster_ai_sync().  This keeps Celery tasks
+    # fully synchronous while reusing the same async AI logic used by the
+    # SSE pipeline.
+    # -----------------------------------------------------------------------
+    if clusters:
+        _write_job_status(job_id, {
+            "job_id":       job_id,
+            "state":        "ai_review",
+            "progress_pct": 88,
+            "message":      (
+                f"Step 4: AI reviewing {len(clusters)} exception cluster(s) "
+                f"({total_exception} total exceptions) — 1 LLM call..."
+            ),
+            "chunks_done":  len(chunk_results),
+            "total_chunks": len(chunk_results),
+        })
+
+        try:
+            cluster_diagnoses = _run_cluster_ai_sync(clusters)
+            logger.info(
+                "finalize_pipeline: Step 4 complete — %d cluster diagnoses from AI",
+                len(cluster_diagnoses),
+            )
+        except Exception as exc:                                     # noqa: BLE001
+            logger.warning("AI cluster review failed (non-critical): %s", exc)
+            # Fall back to raw clusters without AI diagnoses
+            cluster_diagnoses = [
+                {
+                    "reason":       c["reason"],
+                    "method":       c["method"],
+                    "count":        c["count"],
+                    "avg_amount":   c.get("avg_amount", 0.0),
+                    "date_range":   c.get("date_range", ""),
+                    "sample_ids":   c.get("sample_ids", ""),
+                    "diagnosis":    "AI diagnosis unavailable (worker error).",
+                    "batch_action": "Manual review required.",
+                    "urgency":      "medium",
+                }
+                for c in clusters
+            ]
+    else:
+        logger.info("finalize_pipeline: Step 4 skipped — no exception clusters to review.")
+
+    # -----------------------------------------------------------------------
+    # 4. Full Tax Summary (deterministic SQL CASE expression, $0 cost)
+    # -----------------------------------------------------------------------
+    _write_job_status(job_id, {
+        "job_id":       job_id,
+        "state":        "tax_summary",
+        "progress_pct": 91,
+        "message":      "Computing GST tax summary (deterministic SQL)...",
+        "chunks_done":  len(chunk_results),
+        "total_chunks": len(chunk_results),
+    })
+
+    tax_summary: dict = {}
+    try:
+        from agents.tax_matcher import _compute_tax_summary_from_db
+        tax_summary = _compute_tax_summary_from_db()
+        logger.info(
+            "finalize_pipeline: Tax summary — %d payments tagged, ₹%.2f total GST",
+            tax_summary.get("total_tagged", 0), tax_summary.get("total_tax_inr", 0.0),
+        )
+    except Exception as exc:                                         # noqa: BLE001
+        logger.warning("Tax summary failed (non-critical): %s", exc)
+
+    # -----------------------------------------------------------------------
+    # 5. 30-day Cash Forecast (SQL window function — runs on the full dataset)
+    # -----------------------------------------------------------------------
+    _write_job_status(job_id, {
+        "job_id":       job_id,
+        "state":        "forecasting",
+        "progress_pct": 94,
+        "message":      "Computing 30-day cash forecast (SQL window function)...",
+        "chunks_done":  len(chunk_results),
+        "total_chunks": len(chunk_results),
+    })
+
+    forecast: dict = {}
     try:
         from tools.metrics_views import get_all_metrics
         all_metrics = get_all_metrics()
         forecast    = all_metrics.get("pending_settlement", {})
-    except Exception as exc:
-        logger.warning("Forecast aggregation failed: %s", exc)
-        forecast = {}
+        logger.info("finalize_pipeline: Forecast aggregation complete.")
+    except Exception as exc:                                         # noqa: BLE001
+        logger.warning("Forecast aggregation failed (non-critical): %s", exc)
 
     # -----------------------------------------------------------------------
-    # 3. Cache warm-up
+    # 6. Cache warm-up (pre-populate Upstash Redis for Q&A fast-path)
     # -----------------------------------------------------------------------
+    _write_job_status(job_id, {
+        "job_id":       job_id,
+        "state":        "warming_cache",
+        "progress_pct": 97,
+        "message":      "Warming Q&A cache (Upstash Redis)...",
+        "chunks_done":  len(chunk_results),
+        "total_chunks": len(chunk_results),
+    })
+
     try:
         from agents.settlement_qa import warm_cache
-        asyncio.get_event_loop().run_until_complete(warm_cache())
-        logger.info("Cache warm-up complete after batch pipeline")
-    except Exception as exc:
+        asyncio.run(warm_cache())
+        logger.info("finalize_pipeline: Cache warm-up complete.")
+    except RuntimeError:
+        # asyncio.run() raises if there's already a running loop (Celery --pool=solo)
+        try:
+            import asyncio as _asyncio
+            loop = _asyncio.new_event_loop()
+            loop.run_until_complete(warm_cache())
+            loop.close()
+        except Exception as exc2:                                    # noqa: BLE001
+            logger.warning("Cache warm-up failed (non-critical): %s", exc2)
+    except Exception as exc:                                         # noqa: BLE001
         logger.warning("Cache warm-up failed (non-critical): %s", exc)
 
     # -----------------------------------------------------------------------
-    # 4. Assemble final report
+    # 7. Assemble final report
     # -----------------------------------------------------------------------
     report = {
         "job_id":               job_id,
@@ -334,10 +533,17 @@ def finalize_pipeline(self, chunk_results: list[dict], job_id: str) -> dict:
         "exception_count":      total_exception,
         "match_rate":           round(match_rate, 4),
         "match_rate_pct":       round(match_rate * 100, 2),
-        "total_tax_inr":        round(total_tax, 2),
+        # Step 3: exception clusters (SQL fingerprinting, zero LLM cost)
+        "exception_clusters":   clusters,
+        # Step 4: AI diagnoses per cluster (1 LLM call total)
+        "cluster_diagnoses":    cluster_diagnoses,
+        # Tax summary (deterministic SQL)
+        "tax_summary":          tax_summary,
+        # 30-day forecast (SQL window function)
+        "forecast_summary":     forecast,
+        # Chunk telemetry
         "total_worker_seconds": round(total_elapsed, 2),
         "chunk_count":          len(chunk_results),
-        "forecast_summary":     forecast,
         "chunk_results":        chunk_results,
     }
 
@@ -347,7 +553,8 @@ def finalize_pipeline(self, chunk_results: list[dict], job_id: str) -> dict:
         "progress_pct": 100,
         "message":      (
             f"Pipeline complete — {total_matched} matched, {total_exception} exceptions "
-            f"({round(match_rate * 100, 1)}% match rate)"
+            f"({round(match_rate * 100, 1)}% match rate) | "
+            f"{len(cluster_diagnoses)} exception cluster(s) AI-reviewed"
         ),
         "chunks_done":  len(chunk_results),
         "total_chunks": len(chunk_results),
@@ -355,8 +562,8 @@ def finalize_pipeline(self, chunk_results: list[dict], job_id: str) -> dict:
     })
 
     logger.info(
-        "finalize_pipeline done — %d payments, %.1f%% match rate",
-        total_payments, match_rate * 100,
+        "finalize_pipeline done — %d payments, %.1f%% match rate, %d AI cluster diagnoses",
+        total_payments, match_rate * 100, len(cluster_diagnoses),
     )
     return report
 

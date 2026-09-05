@@ -48,16 +48,25 @@ $uvicorn = Join-Path $venvPath "Scripts\uvicorn.exe"
 Write-Host "[2/4] Installing backend dependencies..." -ForegroundColor Cyan
 & $pip install -r (Join-Path $root "backend\requirements.txt") --quiet
 
-# ── 2. Backend: start uvicorn in a new window ─────────────────────────────────
-Write-Host "[3/4] Starting FastAPI backend on http://localhost:8000 ..." -ForegroundColor Cyan
+# ── 2. Backend: start uvicorn in a new window ──────────────────────────────────────────────────
+Write-Host "[3/5] Starting FastAPI backend on http://localhost:8000 ..." -ForegroundColor Cyan
 Start-Process powershell -ArgumentList @(
     "-NoExit",
     "-Command",
     "& '$uvicorn' backend.main:app --reload --host 0.0.0.0 --port 8000"
 ) -WorkingDirectory $root
 
-# ── 3. Frontend: install deps and start Vite ──────────────────────────────────
-Write-Host "[4/4] Starting Vite dev server on http://localhost:5173 ..." -ForegroundColor Cyan
+# ── 2b. Celery background worker ──────────────────────────────────────────────────────────────
+Write-Host "[4/5] Starting Celery background worker (--pool=solo for Windows) ..." -ForegroundColor Cyan
+$celery = Join-Path $venvPath "Scripts\celery.exe"
+Start-Process powershell -ArgumentList @(
+    "-NoExit",
+    "-Command",
+    "& '$celery' -A worker.celery_app worker --loglevel=info --pool=solo"
+) -WorkingDirectory (Join-Path $root "backend")
+
+# ── 3. Frontend: install deps and start Vite ──────────────────────────────────────────────────
+Write-Host "[5/5] Starting Vite dev server on http://localhost:5173 ..." -ForegroundColor Cyan
 $frontendDir = Join-Path $root "frontend"
 
 Start-Process powershell -ArgumentList @(
@@ -70,7 +79,8 @@ Start-Process powershell -ArgumentList @(
 Start-Sleep -Seconds 4
 Start-Process "http://localhost:5173"
 
-Write-Host "`n✅  Both servers started." -ForegroundColor Green
+Write-Host "`n✅  All 3 servers started." -ForegroundColor Green
 Write-Host "   Backend  → http://localhost:8000/docs" -ForegroundColor White
+Write-Host "   Celery   → watching finance_batch queue" -ForegroundColor White
 Write-Host "   Frontend → http://localhost:5173" -ForegroundColor White
 Write-Host "`nPress Ctrl+C in each window to stop.`n" -ForegroundColor DarkGray
